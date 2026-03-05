@@ -1,4 +1,3 @@
-
 import discord
 from discord.ext import commands, tasks
 import json
@@ -11,7 +10,7 @@ from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("DISCORD_TOKEN")
-DB_CHANNEL_ID = os.getenv("DB_CHANNEL_ID") # The ID of the private Discord channel for database
+DB_CHANNEL_ID = os.getenv("DB_CHANNEL_ID") 
 
 # --- DISCORD CHANNEL DATABASE ---
 async def load_data(bot):
@@ -24,7 +23,6 @@ async def load_data(bot):
         print("ERROR: Could not find the database channel. Check the ID and bot permissions.")
         return {"admins": [], "slots": {}}
 
-    # Look for the last message with an attachment
     async for message in channel.history(limit=10):
         if message.attachments:
             try:
@@ -48,15 +46,13 @@ async def save_data(bot):
     if not channel:
         return
 
-    # Convert the dictionary to a JSON file in memory
     data_str = json.dumps(bot.slots_data, indent=4)
     file = discord.File(io.BytesIO(data_str.encode('utf-8')), filename="slots_data.json")
     
-    # Purge old messages in the DB channel to keep it clean (optional but recommended)
     try:
         await channel.purge(limit=5)
     except Exception:
-        pass # In case bot lacks manage_messages permission in that specific channel
+        pass 
         
     await channel.send("💾 Auto-backup of slots data", file=file)
 
@@ -79,7 +75,7 @@ intents = discord.Intents.default()
 intents.message_content = True 
 
 bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
-bot.slots_data = {"admins": [], "slots": {}} # Default empty state until loaded
+bot.slots_data = {"admins": [], "slots": {}} 
 
 # --- PERMISSIONS CHECK ---
 def is_bot_admin():
@@ -94,15 +90,11 @@ def is_bot_admin():
 # --- EVENTS ---
 @bot.event
 async def on_ready():
-    # Only run setup once (on_ready can trigger multiple times if connection drops)
     if not hasattr(bot, 'startup_done'):
-        # Load the data from the Discord channel
         bot.slots_data = await load_data(bot)
-        
         bot.check_expirations.start()
         bot.reset_pings.start()
         bot.loop.create_task(start_web_server())
-        
         bot.startup_done = True
         print(f"Bot connected as {bot.user} | Prefix: +")
 
@@ -110,8 +102,22 @@ async def on_ready():
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
         await ctx.send("❌ You don't have permission to use this command.")
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing argument. Please check the command syntax.")
+    elif isinstance(error, commands.MissingRequiredArgument) or isinstance(error, commands.BadArgument):
+        usages = {
+            "screate": "`+screate <duration: 1w/1m/lifetime> <@user>`\n*Example:* `+screate 1w @Justin`",
+            "setpings": "`+setpings <here_limit> <everyone_limit>`\n*Example:* `+setpings 1 0`",
+            "sextend": "`+sextend <@user> <duration: 1w/1m/lifetime>`\n*Example:* `+sextend @Justin 1m`",
+            "sdelete": "`+sdelete <@user>`\n*Example:* `+sdelete @Justin`",
+            "addowner": "`+addowner <@user>`\n*Example:* `+addowner @Justin`"
+        }
+        
+        command_name = ctx.command.name if ctx.command else "unknown"
+        
+        if command_name in usages:
+            await ctx.send(f"❌ **Invalid Syntax!**\n**Correct usage:** {usages[command_name]}")
+        else:
+            await ctx.send("❌ Missing or invalid argument. Please check the command syntax.")
+            
     elif isinstance(error, commands.CommandNotFound):
         pass 
     else:
@@ -166,6 +172,34 @@ async def reset_pings():
     await save_data(bot)
 
 # --- COMMANDS ---
+
+@bot.command(name="help")
+async def help_cmd(ctx):
+    embed = discord.Embed(
+        title="🛠️ Bot Commands Menu",
+        description="Here is the list of all available commands for the slot bot.",
+        color=discord.Color.blurple()
+    )
+    
+    admin_cmds = (
+        "**`+screate <1w/1m/lifetime> <@user>`**\n↳ Create a new personal slot for a user.\n\n"
+        "**`+setpings <here_limit> <everyone_limit>`**\n↳ Set daily allowed pings (must be used inside the slot).\n\n"
+        "**`+sextend <@user> <1w/1m/lifetime>`**\n↳ Add more time to a user's existing slot.\n\n"
+        "**`+sdelete <@user>`**\n↳ Delete all slots owned by a user.\n\n"
+        "**`+list`**\n↳ View all active slots and their expiration dates.\n\n"
+        "**`+addowner <@user>`**\n↳ Give bot admin permissions to a staff member."
+    )
+    embed.add_field(name="👑 Admin Commands", value=admin_cmds, inline=False)
+    
+    client_cmds = (
+        "**`+pings`**\n↳ Check how many daily mentions you have left.\n\n"
+        "**`+help`**\n↳ Display this help menu."
+    )
+    embed.add_field(name="👤 Client Commands", value=client_cmds, inline=False)
+    
+    embed.set_footer(text="Requested by " + ctx.author.name, icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
 
 @bot.command(name="addowner")
 @commands.has_permissions(administrator=True) 
