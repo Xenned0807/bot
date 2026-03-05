@@ -16,12 +16,12 @@ DB_CHANNEL_ID = os.getenv("DB_CHANNEL_ID")
 async def load_data(bot):
     if not DB_CHANNEL_ID:
         print("ERROR: DB_CHANNEL_ID environment variable is missing!")
-        return {"admins": [], "slots": {}}
+        return {"admin": None, "blacklist": [], "slots": {}}
         
     channel = bot.get_channel(int(DB_CHANNEL_ID))
     if not channel:
         print("ERROR: Could not find the database channel. Check the ID and bot permissions.")
-        return {"admins": [], "slots": {}}
+        return {"admin": None, "blacklist": [], "slots": {}}
 
     async for message in channel.history(limit=10):
         if message.attachments:
@@ -29,14 +29,21 @@ async def load_data(bot):
                 file_bytes = await message.attachments[0].read()
                 data = json.loads(file_bytes.decode('utf-8'))
                 print("✅ Database loaded from Discord channel successfully.")
+                
+                # Mise à jour de la structure
                 if "slots" not in data:
-                    return {"admins": [], "slots": data}
+                    data = {"admin": None, "blacklist": [], "slots": data}
+                if "blacklist" not in data:
+                    data["blacklist"] = []
+                if "admin" not in data:
+                    data["admin"] = None
+                    
                 return data
             except Exception as e:
                 print(f"Error parsing database: {e}")
                 
     print("ℹ️ No database file found in channel. Starting fresh.")
-    return {"admins": [], "slots": {}}
+    return {"admin": None, "blacklist": [], "slots": {}}
 
 async def save_data(bot):
     if not DB_CHANNEL_ID:
@@ -75,14 +82,14 @@ intents = discord.Intents.default()
 intents.message_content = True 
 
 bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
-bot.slots_data = {"admins": [], "slots": {}} 
+bot.slots_data = {"admin": None, "blacklist": [], "slots": {}} 
 
 # --- PERMISSIONS CHECK ---
 def is_bot_admin():
     async def predicate(ctx):
         if ctx.author.guild_permissions.administrator:
             return True
-        if ctx.author.id in bot.slots_data.get("admins", []):
+        if ctx.author.id == bot.slots_data.get("admin"):
             return True
         return False
     return commands.check(predicate)
@@ -108,7 +115,9 @@ async def on_command_error(ctx, error):
             "setpings": "`+setpings <here_limit> <everyone_limit>`\n*Example:* `+setpings 1 0`",
             "sextend": "`+sextend <@user> <duration: 1w/1m/lifetime>`\n*Example:* `+sextend @Justin 1m`",
             "sdelete": "`+sdelete <@user>`\n*Example:* `+sdelete @Justin`",
-            "addowner": "`+addowner <@user>`\n*Example:* `+addowner @Justin`"
+            "addowner": "`+addowner <@user>`\n*Example:* `+addowner @Justin`",
+            "sslotblacklist": "`+sslotblacklist <@user>`\n*Example:* `+sslotblacklist @Justin`",
+            "say": "`+say <text>`\n*Example:* `+say Welcome to the server!`"
         }
         
         command_name = ctx.command.name if ctx.command else "unknown"
@@ -187,7 +196,11 @@ async def help_cmd(ctx):
         "**`+sextend <@user> <1w/1m/lifetime>`**\n↳ Add more time to a user's existing slot.\n\n"
         "**`+sdelete <@user>`**\n↳ Delete all slots owned by a user.\n\n"
         "**`+list`**\n↳ View all active slots and their expiration dates.\n\n"
-        "**`+addowner <@user>`**\n↳ Give bot admin permissions to a staff member."
+        "**`+srestore`**\n↳ Manually restore write access and reset pings for a revoked slot (use inside the slot).\n\n"
+        "**`+say <text>`**\n↳ Send a professional embed message as the bot.\n\n"
+        "**`+sslotblacklist <@user>`**\n↳ Blacklist a user from getting a slot.\n\n"
+        "**`+addowner <@user>`**\n↳ Set a single staff member as the bot admin.\n\n"
+        "**`+sremoveowner`**\n↳ Remove the current bot admin."
     )
     embed.add_field(name="👑 Admin Commands", value=admin_cmds, inline=False)
     
@@ -201,20 +214,59 @@ async def help_cmd(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="say")
+@is_bot_admin()
+async def say(ctx, *, text: str):
+    try:
+        await ctx.message.delete() 
+    except discord.Forbidden:
+        pass 
+        
+    embed = discord.Embed(
+        description=text,
+        color=discord.Color.dark_theme() 
+    )
+    await ctx.send(embed=embed)
+
+
 @bot.command(name="addowner")
 @commands.has_permissions(administrator=True) 
 async def addowner(ctx, member: discord.Member):
-    if member.id not in bot.slots_data["admins"]:
-        bot.slots_data["admins"].append(member.id)
+    bot.slots_data["admin"] = member.id
+    await save_data(bot)
+    await ctx.send(f"✅ {member.mention} is now the **sole bot admin**. (Any previous admin has been replaced)")
+
+
+@bot.command(name="sremoveowner")
+@commands.has_permissions(administrator=True) 
+async def sremoveowner(ctx):
+    current_admin = bot.slots_data.get("admin")
+    if current_admin:
+        bot.slots_data["admin"] = None
         await save_data(bot)
-        await ctx.send(f"✅ {member.mention} has been added as a bot admin.")
+        await ctx.send(f"✅ The current bot admin (<@{current_admin}>) has been removed.")
     else:
-        await ctx.send(f"⚠️ {member.mention} is already a bot admin.")
+        await ctx.send("⚠️ There is no bot admin currently set up.")
+
+
+@bot.command(name="sslotblacklist")
+@is_bot_admin()
+async def sslotblacklist(ctx, member: discord.Member):
+    if member.id not in bot.slots_data["blacklist"]:
+        bot.slots_data["blacklist"].append(member.id)
+        await save_data(bot)
+        await ctx.send(f"🚫 {member.mention} has been permanently blacklisted from getting slots.")
+    else:
+        await ctx.send(f"⚠️ {member.mention} is already blacklisted.")
 
 
 @bot.command(name="screate")
 @is_bot_admin()
 async def screate(ctx, duration: str, client: discord.Member):
+    if client.id in bot.slots_data.get("blacklist", []):
+        await ctx.send(f"❌ {client.mention} is blacklisted and cannot receive a slot.")
+        return
+
     guild = ctx.guild
     duration = duration.lower()
 
@@ -309,7 +361,7 @@ async def pings(ctx):
 
     slot = bot.slots_data["slots"][channel_id_str]
     
-    if slot["owner_id"] != ctx.author.id and ctx.author.id not in bot.slots_data["admins"] and not ctx.author.guild_permissions.administrator:
+    if slot["owner_id"] != ctx.author.id and ctx.author.id != bot.slots_data.get("admin") and not ctx.author.guild_permissions.administrator:
         await ctx.send("❌ You do not have permission to view this.")
         return
 
@@ -324,6 +376,38 @@ async def pings(ctx):
     embed.add_field(name="`@everyone` Mentions", value=f"{rem_every} remaining", inline=True)
     embed.set_footer(text="These limits reset every 24 hours.")
     
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="srestore")
+@is_bot_admin()
+async def srestore(ctx):
+    channel_id_str = str(ctx.channel.id)
+    
+    if channel_id_str not in bot.slots_data["slots"]:
+        await ctx.send("❌ This command must be used inside a registered slot channel.")
+        return
+
+    slot = bot.slots_data["slots"][channel_id_str]
+    owner = ctx.guild.get_member(slot["owner_id"])
+    
+    if not owner:
+        await ctx.send("❌ The owner of this slot is no longer in the server.")
+        return
+
+    # On remet les pings à 0
+    slot["used_here"] = 0
+    slot["used_everyone"] = 0
+    await save_data(bot)
+
+    # On rend les permissions au membre
+    await ctx.channel.set_permissions(owner, send_messages=True, mention_everyone=True, manage_messages=True)
+
+    embed = discord.Embed(
+        title="✅ Slot Restored",
+        description=f"<@{owner.id}>, your write access and mentions have been manually restored by an admin. Your daily pings have been reset.",
+        color=discord.Color.green()
+    )
     await ctx.send(embed=embed)
 
 
