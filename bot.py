@@ -1,38 +1,66 @@
+
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
 import json
 import os
 import datetime
 import asyncio
-from aiohttp import web # NOUVELLE LIGNE : Pour le serveur web de Render
+import io
+from aiohttp import web
 from dateutil.relativedelta import relativedelta 
 
 # --- CONFIGURATION ---
-# On récupère le token depuis les variables d'environnement de Render
 TOKEN = os.getenv("DISCORD_TOKEN")
-DATA_FILE = "slots_data.json"
+DB_CHANNEL_ID = os.getenv("DB_CHANNEL_ID") # The ID of the private Discord channel for database
 
-# Defining the limits for each plan
-PLANS = {
-    "1w": {"name": "1 Week", "here": 1, "everyone": 0, "duration": {"weeks": 1}},
-    "1m": {"name": "1 Month", "here": 1, "everyone": 1, "duration": {"months": 1}},
-    "lifetime": {"name": "Lifetime", "here": 1, "everyone": 2, "duration": None}
-}
+# --- DISCORD CHANNEL DATABASE ---
+async def load_data(bot):
+    if not DB_CHANNEL_ID:
+        print("ERROR: DB_CHANNEL_ID environment variable is missing!")
+        return {"admins": [], "slots": {}}
+        
+    channel = bot.get_channel(int(DB_CHANNEL_ID))
+    if not channel:
+        print("ERROR: Could not find the database channel. Check the ID and bot permissions.")
+        return {"admins": [], "slots": {}}
 
-# --- DATA MANAGEMENT ---
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    # Look for the last message with an attachment
+    async for message in channel.history(limit=10):
+        if message.attachments:
+            try:
+                file_bytes = await message.attachments[0].read()
+                data = json.loads(file_bytes.decode('utf-8'))
+                print("✅ Database loaded from Discord channel successfully.")
+                if "slots" not in data:
+                    return {"admins": [], "slots": data}
+                return data
+            except Exception as e:
+                print(f"Error parsing database: {e}")
+                
+    print("ℹ️ No database file found in channel. Starting fresh.")
+    return {"admins": [], "slots": {}}
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+async def save_data(bot):
+    if not DB_CHANNEL_ID:
+        return
+        
+    channel = bot.get_channel(int(DB_CHANNEL_ID))
+    if not channel:
+        return
+
+    # Convert the dictionary to a JSON file in memory
+    data_str = json.dumps(bot.slots_data, indent=4)
+    file = discord.File(io.BytesIO(data_str.encode('utf-8')), filename="slots_data.json")
+    
+    # Purge old messages in the DB channel to keep it clean (optional but recommended)
+    try:
+        await channel.purge(limit=5)
+    except Exception:
+        pass # In case bot lacks manage_messages permission in that specific channel
+        
+    await channel.send("💾 Auto-backup of slots data", file=file)
 
 # --- WEB SERVER FOR RENDER ---
-# Ce mini-serveur permet à Render de voir que le bot est en vie
 async def handle_web(request):
     return web.Response(text="Bot is running smoothly!")
 
@@ -41,138 +69,326 @@ async def start_web_server():
     app.router.add_get('/', handle_web)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Render attribue automatiquement un port via la variable PORT
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"Web server started on port {port}")
 
-# --- BOT CLASS ---
-class SlotBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True 
-        super().__init__(command_prefix="!", intents=intents)
-        self.slots_data = load_data()
+# --- BOT SETUP ---
+intents = discord.Intents.default()
+intents.message_content = True 
 
-    async def setup_hook(self):
-        await self.tree.sync()
-        self.check_expirations.start()
-        # On lance le faux serveur web en même temps que le bot
-        self.loop.create_task(start_web_server())
-        print("Bot is ready and commands are synced!")
+bot = commands.Bot(command_prefix="+", intents=intents, help_command=None)
+bot.slots_data = {"admins": [], "slots": {}} # Default empty state until loaded
 
-    @tasks.loop(hours=1)
-    async def check_expirations(self):
-        now = datetime.datetime.now().timestamp()
-        to_delete = []
+# --- PERMISSIONS CHECK ---
+def is_bot_admin():
+    async def predicate(ctx):
+        if ctx.author.guild_permissions.administrator:
+            return True
+        if ctx.author.id in bot.slots_data.get("admins", []):
+            return True
+        return False
+    return commands.check(predicate)
 
-        for channel_id_str, slot in self.slots_data.items():
-            if slot["expire_at"] and now > slot["expire_at"]:
-                channel = self.get_channel(int(channel_id_str))
-                if channel:
-                    embed = discord.Embed(
-                        title="⏳ Slot Expired",
-                        description=f"<@{slot['owner_id']}>, your channel rental has ended.",
-                        color=discord.Color.red()
-                    )
-                    owner = channel.guild.get_member(slot["owner_id"])
-                    if owner:
-                        await channel.set_permissions(owner, send_messages=False, mention_everyone=False)
-                    await channel.send(embed=embed)
-                to_delete.append(channel_id_str)
+# --- EVENTS ---
+@bot.event
+async def on_ready():
+    # Only run setup once (on_ready can trigger multiple times if connection drops)
+    if not hasattr(bot, 'startup_done'):
+        # Load the data from the Discord channel
+        bot.slots_data = await load_data(bot)
         
-        for ch_id in to_delete:
-            del self.slots_data[ch_id]
-        if to_delete:
-            save_data(self.slots_data)
+        bot.check_expirations.start()
+        bot.reset_pings.start()
+        bot.loop.create_task(start_web_server())
+        
+        bot.startup_done = True
+        print(f"Bot connected as {bot.user} | Prefix: +")
 
-bot = SlotBot()
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        await ctx.send("❌ You don't have permission to use this command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument. Please check the command syntax.")
+    elif isinstance(error, commands.CommandNotFound):
+        pass 
+    else:
+        print(f"Error: {error}")
 
-# --- SLASH COMMANDS ---
+# --- BACKGROUND TASKS ---
+@tasks.loop(hours=1)
+async def check_expirations():
+    now = datetime.datetime.now().timestamp()
+    to_delete = []
 
-@bot.tree.command(name="screate", description="Create a personal slot channel for a client")
-@app_commands.describe(plan="The rental duration", client="The member who purchased")
-@app_commands.choices(plan=[
-    app_commands.Choice(name="1 Week", value="1w"),
-    app_commands.Choice(name="1 Month", value="1m"),
-    app_commands.Choice(name="Lifetime", value="lifetime")
-])
-@app_commands.default_permissions(manage_channels=True)
-async def screate(interaction: discord.Interaction, plan: app_commands.Choice[str], client: discord.Member):
-    guild = interaction.guild
-    plan_data = PLANS[plan.value]
+    for channel_id_str, slot in bot.slots_data["slots"].items():
+        if slot["expire_at"] and now > slot["expire_at"]:
+            channel = bot.get_channel(int(channel_id_str))
+            if channel:
+                embed = discord.Embed(
+                    title="⏳ Slot Expired",
+                    description=f"<@{slot['owner_id']}>, your channel rental has ended.",
+                    color=discord.Color.red()
+                )
+                owner = channel.guild.get_member(slot["owner_id"])
+                if owner:
+                    await channel.set_permissions(owner, send_messages=False, mention_everyone=False)
+                await channel.send(embed=embed)
+            to_delete.append(channel_id_str)
+    
+    for ch_id in to_delete:
+        del bot.slots_data["slots"][ch_id]
+        
+    if to_delete:
+        await save_data(bot)
+
+@tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=datetime.timezone.utc))
+async def reset_pings():
+    for channel_id_str, slot in bot.slots_data["slots"].items():
+        slot["used_here"] = 0
+        slot["used_everyone"] = 0
+        
+        channel = bot.get_channel(int(channel_id_str))
+        if channel:
+            owner = channel.guild.get_member(slot["owner_id"])
+            if owner:
+                await channel.set_permissions(owner, send_messages=True, mention_everyone=True, manage_messages=True)
+            
+            embed = discord.Embed(
+                title="🔄 Daily Pings Reset",
+                description=f"<@{slot['owner_id']}>, your daily pings have been reset to zero! You can now use your allowed mentions again.",
+                color=discord.Color.blue()
+            )
+            await channel.send(embed=embed)
+            
+    await save_data(bot)
+
+# --- COMMANDS ---
+
+@bot.command(name="addowner")
+@commands.has_permissions(administrator=True) 
+async def addowner(ctx, member: discord.Member):
+    if member.id not in bot.slots_data["admins"]:
+        bot.slots_data["admins"].append(member.id)
+        await save_data(bot)
+        await ctx.send(f"✅ {member.mention} has been added as a bot admin.")
+    else:
+        await ctx.send(f"⚠️ {member.mention} is already a bot admin.")
+
+
+@bot.command(name="screate")
+@is_bot_admin()
+async def screate(ctx, duration: str, client: discord.Member):
+    guild = ctx.guild
+    duration = duration.lower()
+
+    expire_timestamp = None
+    duration_text = "Unknown"
+    
+    if duration == "1w":
+        expire_date = datetime.datetime.now() + relativedelta(weeks=1)
+        expire_timestamp = expire_date.timestamp()
+        duration_text = "1 Week"
+    elif duration == "1m":
+        expire_date = datetime.datetime.now() + relativedelta(months=1)
+        expire_timestamp = expire_date.timestamp()
+        duration_text = "1 Month"
+    elif duration == "lifetime":
+        expire_timestamp = None
+        duration_text = "Lifetime"
+    else:
+        await ctx.send("❌ Invalid duration. Please use `1w`, `1m`, or `lifetime`.")
+        return
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
         client: discord.PermissionOverwrite(read_messages=True, send_messages=True, mention_everyone=True, manage_messages=True)
     }
 
-    category = interaction.channel.category 
+    category = ctx.channel.category 
     channel_name = f"slot-{client.name}"
     
     new_channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites)
 
-    expire_timestamp = None
-    if plan_data["duration"]:
-        expire_date = datetime.datetime.now() + relativedelta(**plan_data["duration"])
-        expire_timestamp = expire_date.timestamp()
-
-    bot.slots_data[str(new_channel.id)] = {
+    bot.slots_data["slots"][str(new_channel.id)] = {
         "owner_id": client.id,
-        "plan": plan.value,
         "expire_at": expire_timestamp,
+        "limit_here": 0,       
+        "limit_everyone": 0,   
         "used_here": 0,
-        "used_everyone": 0,
-        "limit_here": plan_data["here"],
-        "limit_everyone": plan_data["everyone"]
+        "used_everyone": 0
     }
-    save_data(bot.slots_data)
+    await save_data(bot)
 
     embed = discord.Embed(
-        title="🎉 Creation of your Personal Slot",
+        title="🎉 Personal Slot Created",
         description=f"Welcome to your channel <@{client.id}>!\nYou can promote your services here.",
         color=discord.Color.green()
     )
-    embed.add_field(name="Plan", value=plan_data['name'], inline=True)
+    embed.add_field(name="Plan", value=duration_text, inline=True)
     if expire_timestamp:
         embed.add_field(name="Expires on", value=f"<t:{int(expire_timestamp)}:d>", inline=True)
     else:
         embed.add_field(name="Expires on", value="Never (Lifetime)", inline=True)
         
-    embed.add_field(name="Allowed Mentions", value=f"`@here` : {plan_data['here']}\n`@everyone` : {plan_data['everyone']}", inline=False)
-    embed.set_footer(text="Use /pings to see your remaining mentions.")
+    embed.set_footer(text="An admin needs to configure your daily pings with +setpings.")
 
     await new_channel.send(content=client.mention, embed=embed)
-    await interaction.response.send_message(f"✅ The slot has been created: {new_channel.mention}", ephemeral=True)
+    await ctx.send(f"✅ The slot has been created: {new_channel.mention}. Don't forget to use `+setpings` inside it.")
 
 
-@bot.tree.command(name="pings", description="Check the number of remaining mentions for this slot")
-async def pings(interaction: discord.Interaction):
-    channel_id_str = str(interaction.channel.id)
+@bot.command(name="setpings")
+@is_bot_admin()
+async def setpings(ctx, limit_here: int, limit_everyone: int):
+    channel_id_str = str(ctx.channel.id)
     
-    if channel_id_str not in bot.slots_data:
-        await interaction.response.send_message("❌ This channel is not a registered slot.", ephemeral=True)
+    if channel_id_str not in bot.slots_data["slots"]:
+        await ctx.send("❌ This channel is not a registered slot.")
         return
 
-    slot = bot.slots_data[channel_id_str]
+    slot = bot.slots_data["slots"][channel_id_str]
+    slot["limit_here"] = limit_here
+    slot["limit_everyone"] = limit_everyone
+    await save_data(bot)
+
+    embed = discord.Embed(
+        title="⚙️ Daily Pings Configured",
+        description=f"The daily ping limits for this slot have been updated.",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="`@here` Limit", value=str(limit_here), inline=True)
+    embed.add_field(name="`@everyone` Limit", value=str(limit_everyone), inline=True)
+    embed.set_footer(text="Pings will automatically reset every 24 hours.")
     
-    if slot["owner_id"] != interaction.user.id and not interaction.user.guild_permissions.manage_channels:
-        await interaction.response.send_message("❌ You are not the owner of this slot.", ephemeral=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="pings")
+async def pings(ctx):
+    channel_id_str = str(ctx.channel.id)
+    
+    if channel_id_str not in bot.slots_data["slots"]:
+        await ctx.send("❌ This channel is not a registered slot.")
+        return
+
+    slot = bot.slots_data["slots"][channel_id_str]
+    
+    if slot["owner_id"] != ctx.author.id and ctx.author.id not in bot.slots_data["admins"] and not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ You do not have permission to view this.")
         return
 
     rem_here = slot["limit_here"] - slot["used_here"]
     rem_every = slot["limit_everyone"] - slot["used_everyone"]
 
     embed = discord.Embed(
-        title="📊 Your Remaining Mentions",
+        title="📊 Your Daily Mentions Left",
         color=discord.Color.blue()
     )
     embed.add_field(name="`@here` Mentions", value=f"{rem_here} remaining", inline=True)
     embed.add_field(name="`@everyone` Mentions", value=f"{rem_every} remaining", inline=True)
+    embed.set_footer(text="These limits reset every 24 hours.")
     
-    await interaction.response.send_message(embed=embed)
+    await ctx.send(embed=embed)
 
+
+@bot.command(name="list")
+@is_bot_admin()
+async def list_slots(ctx):
+    if not bot.slots_data["slots"]:
+        await ctx.send("📭 There are no active slots at the moment.")
+        return
+
+    embed = discord.Embed(
+        title="📋 List of Active Slots",
+        color=discord.Color.purple()
+    )
+    
+    for channel_id_str, slot in bot.slots_data["slots"].items():
+        channel = bot.get_channel(int(channel_id_str))
+        channel_name = channel.mention if channel else f"Deleted Channel ({channel_id_str})"
+        
+        expire_at = slot["expire_at"]
+        if expire_at:
+            expire_text = f"<t:{int(expire_at)}:f>"
+        else:
+            expire_text = "Never (Lifetime)"
+            
+        embed.add_field(
+            name=f"Owner: @{bot.get_user(slot['owner_id'])}", 
+            value=f"**Channel:** {channel_name}\n**Expires:** {expire_text}", 
+            inline=False
+        )
+        
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="sdelete", aliases=["sclose"])
+@is_bot_admin()
+async def sdelete(ctx, client: discord.Member):
+    to_delete = []
+    
+    for channel_id_str, slot in bot.slots_data["slots"].items():
+        if slot["owner_id"] == client.id:
+            to_delete.append(channel_id_str)
+            
+    if not to_delete:
+        await ctx.send(f"❌ {client.mention} doesn't own any active slots.")
+        return
+        
+    for ch_id in to_delete:
+        channel = bot.get_channel(int(ch_id))
+        if channel:
+            await channel.delete(reason=f"Slot deleted by {ctx.author.name}")
+        del bot.slots_data["slots"][ch_id]
+        
+    await save_data(bot)
+    await ctx.send(f"✅ Successfully deleted {len(to_delete)} slot(s) for {client.mention}.")
+
+
+@bot.command(name="sextend")
+@is_bot_admin()
+async def sextend(ctx, client: discord.Member, duration: str):
+    duration = duration.lower()
+    slots_found = []
+    
+    for channel_id_str, slot in bot.slots_data["slots"].items():
+        if slot["owner_id"] == client.id:
+            slots_found.append(channel_id_str)
+            
+    if not slots_found:
+        await ctx.send(f"❌ {client.mention} doesn't own any active slots.")
+        return
+        
+    if duration not in ["1w", "1m", "lifetime"]:
+        await ctx.send("❌ Invalid duration. Please use `1w`, `1m`, or `lifetime`.")
+        return
+        
+    for ch_id in slots_found:
+        slot = bot.slots_data["slots"][ch_id]
+        
+        if duration == "lifetime":
+            slot["expire_at"] = None
+        else:
+            current_expire = slot["expire_at"]
+            if current_expire:
+                base_date = datetime.datetime.fromtimestamp(current_expire)
+            else: 
+                base_date = datetime.datetime.now()
+                
+            if duration == "1w":
+                new_date = base_date + relativedelta(weeks=1)
+            elif duration == "1m":
+                new_date = base_date + relativedelta(months=1)
+                
+            slot["expire_at"] = new_date.timestamp()
+            
+    await save_data(bot)
+    await ctx.send(f"✅ Successfully extended {len(slots_found)} slot(s) for {client.mention} by {duration}.")
+
+
+# --- MENTIONS MONITORING ---
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -180,8 +396,8 @@ async def on_message(message: discord.Message):
 
     channel_id_str = str(message.channel.id)
     
-    if channel_id_str in bot.slots_data:
-        slot = bot.slots_data[channel_id_str]
+    if channel_id_str in bot.slots_data["slots"]:
+        slot = bot.slots_data["slots"][channel_id_str]
         
         if message.author.id == slot["owner_id"]:
             has_here = "@here" in message.content
@@ -209,10 +425,9 @@ async def on_message(message: discord.Message):
 
                     embed_revoke = discord.Embed(
                         title="🛑 Slot Revoked",
-                        description=f"<@{message.author.id}>, you have exceeded your mention limit (`{reason}`). You have lost write access to this channel.",
+                        description=f"<@{message.author.id}>, you have exceeded your daily mention limit (`{reason}`). You have lost write access to this channel until the daily reset.",
                         color=discord.Color.dark_red()
                     )
-                    embed_revoke.set_footer(text="Please contact the administration if you believe this is an error.")
                     await message.channel.send(embed=embed_revoke)
 
                 else:
@@ -221,7 +436,7 @@ async def on_message(message: discord.Message):
                     
                     embed_info = discord.Embed(
                         title="🔔 Mention Used",
-                        description="Here is your new mention balance for this slot:",
+                        description="Here is your remaining daily balance:",
                         color=discord.Color.gold()
                     )
                     embed_info.add_field(name="`@here` Mentions", value=f"{rem_here} remaining", inline=True)
@@ -229,12 +444,12 @@ async def on_message(message: discord.Message):
                     
                     await message.channel.send(content=message.author.mention, embed=embed_info)
 
-                save_data(bot.slots_data)
+                await save_data(bot)
 
     await bot.process_commands(message)
 
-# Lancement du bot avec la vérification que le token existe bien
+
 if TOKEN is None:
-    print("ERREUR: La variable d'environnement DISCORD_TOKEN n'est pas définie.")
+    print("ERROR: DISCORD_TOKEN environment variable is not set.")
 else:
     bot.run(TOKEN)
