@@ -49,106 +49,7 @@ def error_embed(description: str) -> discord.Embed:
     return discord.Embed(title="❌ System Error", description=description, color=0xff0000)
 
 # ==========================================
-# BOT CLASS & DATABASE SYSTEM
-# ==========================================
-class MassiveSlotBot(commands.Bot):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True 
-        intents.members = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
-        
-        self.db = {"slots": {}, "keys": {}, "blacklist": []}
-        self.db_loaded = False
-
-    async def setup_hook(self):
-        await self.load_database()
-        self.backup_task.start()
-        self.check_expirations.start()
-        self.reset_pings.start()
-        self.loop.create_task(start_web_server())
-        await self.tree.sync()
-        print("✅ Slash commands globally synchronized.")
-
-    async def load_database(self):
-        if not DB_CHANNEL_ID:
-            print("⚠️ WARNING: DB_CHANNEL_ID is missing from environment variables.")
-            return
-
-        channel = self.get_channel(int(DB_CHANNEL_ID))
-        if not channel: 
-            print("❌ ERROR: Database channel not found. Check ID and permissions.")
-            return
-
-        async for message in channel.history(limit=10):
-            if message.attachments:
-                try:
-                    file_bytes = await message.attachments[0].read()
-                    data = json.loads(file_bytes.decode('utf-8'))
-                    self.db["slots"] = data.get("slots", {})
-                    self.db["keys"] = data.get("keys", {})
-                    self.db["blacklist"] = data.get("blacklist", [])
-                    self.db_loaded = True
-                    print("✅ Database loaded successfully from Discord channel.")
-                    return
-                except Exception as e:
-                    print(f"❌ Error parsing DB file: {e}")
-                    continue
-                    
-        print("ℹ️ No database file found. Starting fresh.")
-        self.db_loaded = True
-
-    async def save_database(self, force=False):
-        if not DB_CHANNEL_ID or not self.db_loaded: 
-            return
-            
-        channel = self.get_channel(int(DB_CHANNEL_ID))
-        if not channel: 
-            return
-
-        data_str = json.dumps(self.db, indent=4)
-        file = discord.File(io.BytesIO(data_str.encode('utf-8')), filename="slots_database.json")
-        try:
-            await channel.purge(limit=5)
-            await channel.send("💾 Auto-backup of slots data", file=file)
-            if force:
-                print("💾 Emergency save completed.")
-        except Exception as e:
-            print(f"❌ Failed to save database: {e}")
-
-    @tasks.loop(minutes=30)
-    async def backup_task(self):
-        """Silent backup every 30 mins to avoid Rate Limits on Render."""
-        await self.save_database()
-
-    @tasks.loop(hours=1)
-    async def check_expirations(self):
-        now = time.time()
-        for ch_id, slot in list(self.db["slots"].items()):
-            if slot.get("expire_at") and now > slot["expire_at"] and slot.get("status") == "active":
-                channel = self.get_channel(int(ch_id))
-                if channel:
-                    owner = channel.guild.get_member(slot["owner_id"])
-                    if owner: 
-                        await channel.set_permissions(owner, send_messages=False, mention_everyone=False)
-                    await channel.send(embed=error_embed(f"<@{slot['owner_id']}>, your slot rental has expired. Please contact an admin to renew."))
-                self.db["slots"][ch_id]["status"] = "expired"
-
-    @tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=datetime.timezone.utc))
-    async def reset_pings(self):
-        for ch_id, slot in self.db["slots"].items():
-            if slot.get("status") in ["active", "hold"]:
-                slot["used_here"] = 0
-                slot["used_everyone"] = 0
-                if slot.get("status") == "active":
-                    channel = self.get_channel(int(ch_id))
-                    if channel:
-                        await channel.send(embed=pro_embed("🔄 Daily Reset", "Your daily mentions have been reset to zero."))
-
-bot = MassiveSlotBot()
-
-# ==========================================
-# UI CLASSES (MODALS)
+# UI CLASSES (MODALS & VIEWS)
 # ==========================================
 class CustomizeModal(discord.ui.Modal, title='Customize Your Slot'):
     channel_name = discord.ui.TextInput(
@@ -169,18 +70,16 @@ class CustomizeModal(discord.ui.Modal, title='Customize Your Slot'):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        
         channel = interaction.channel
         new_name = self.channel_name.value.strip()
         new_topic = self.channel_topic.value.strip()
-        
         updates = []
+        
         try:
             if new_name:
                 safe_name = f"slot-{new_name.replace(' ', '-')}"
                 await channel.edit(name=safe_name)
                 updates.append(f"**Name:** `{safe_name}`")
-                
             if new_topic:
                 await channel.edit(topic=new_topic)
                 updates.append("**Topic:** Updated successfully")
@@ -188,14 +87,150 @@ class CustomizeModal(discord.ui.Modal, title='Customize Your Slot'):
             if not updates:
                 return await interaction.followup.send(embed=error_embed("No changes were made. You left all fields blank."))
 
-            embed = pro_embed("🎨 Slot Customized", "\n".join(updates))
-            await interaction.followup.send(embed=embed)
-            
+            await interaction.followup.send(embed=pro_embed("🎨 Slot Customized", "\n".join(updates)))
         except discord.Forbidden:
             await interaction.followup.send(embed=error_embed("The bot lacks permissions to edit this channel."))
         except discord.HTTPException as e:
             await interaction.followup.send(embed=error_embed(f"An error occurred: {e}"))
 
+class TransferModal(discord.ui.Modal, title='Transfer Your Slot'):
+    new_owner_id = discord.ui.TextInput(
+        label='New Owner User ID',
+        style=discord.TextStyle.short,
+        placeholder='e.g., 123456789012345678',
+        required=True,
+        max_length=20
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        ch_id_str = str(interaction.channel.id)
+        
+        if ch_id_str not in interaction.client.db["slots"]:
+            return await interaction.followup.send(embed=error_embed("This channel is not a registered slot."))
+            
+        slot = interaction.client.db["slots"][ch_id_str]
+        
+        # Verify ownership or admin
+        if slot["owner_id"] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+            return await interaction.followup.send(embed=error_embed("Only the slot owner or an administrator can transfer this slot."))
+            
+        try:
+            new_user_id = int(self.new_owner_id.value.strip())
+            new_member = await interaction.guild.fetch_member(new_user_id)
+        except (ValueError, discord.NotFound):
+            return await interaction.followup.send(embed=error_embed("Invalid User ID. Please make sure the user is in this server."))
+
+        if new_member.bot:
+            return await interaction.followup.send(embed=error_embed("You cannot transfer a slot to a bot."))
+
+        # Transfer Permissions
+        old_member = interaction.guild.get_member(slot["owner_id"])
+        if old_member:
+            await interaction.channel.set_permissions(old_member, overwrite=None) # Remove old owner permissions
+            
+        overwrites = discord.PermissionOverwrite(read_messages=True, send_messages=True, mention_everyone=True, manage_messages=True)
+        await interaction.channel.set_permissions(new_member, overwrite=overwrites)
+        
+        # Update DB
+        slot["owner_id"] = new_member.id
+        await interaction.client.save_database(force=True)
+        
+        await interaction.followup.send(embed=pro_embed("✅ Transfer Successful", f"You have successfully transferred this slot to {new_member.mention}."))
+        await interaction.channel.send(embed=pro_embed("🔄 Slot Transferred", f"This slot has been transferred to a new owner: {new_member.mention}."))
+
+class TransferPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None) # Persistent View
+
+    @discord.ui.button(label="Transfer Slot", style=discord.ButtonStyle.primary, custom_id="transfer_slot_button", emoji="🔄")
+    async def transfer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TransferModal())
+
+# ==========================================
+# BOT CLASS & DATABASE SYSTEM
+# ==========================================
+class MassiveSlotBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True 
+        intents.members = True
+        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        
+        self.db = {"slots": {}, "keys": {}, "blacklist": []}
+        self.db_loaded = False
+
+    async def setup_hook(self):
+        self.add_view(TransferPanelView()) # Register the persistent view for the transfer panel
+        await self.load_database()
+        self.backup_task.start()
+        self.check_expirations.start()
+        self.reset_pings.start()
+        self.loop.create_task(start_web_server())
+        await self.tree.sync()
+        print("✅ Slash commands globally synchronized.")
+
+    async def load_database(self):
+        if not DB_CHANNEL_ID: return
+        channel = self.get_channel(int(DB_CHANNEL_ID))
+        if not channel: return
+
+        async for message in channel.history(limit=10):
+            if message.attachments:
+                try:
+                    file_bytes = await message.attachments[0].read()
+                    data = json.loads(file_bytes.decode('utf-8'))
+                    self.db["slots"] = data.get("slots", {})
+                    self.db["keys"] = data.get("keys", {})
+                    self.db["blacklist"] = data.get("blacklist", [])
+                    self.db_loaded = True
+                    print("✅ Database loaded successfully.")
+                    return
+                except Exception:
+                    continue
+        self.db_loaded = True
+
+    async def save_database(self, force=False):
+        if not DB_CHANNEL_ID or not self.db_loaded: return
+        channel = self.get_channel(int(DB_CHANNEL_ID))
+        if not channel: return
+
+        data_str = json.dumps(self.db, indent=4)
+        file = discord.File(io.BytesIO(data_str.encode('utf-8')), filename="slots_database.json")
+        try:
+            await channel.purge(limit=5)
+            await channel.send("💾 Auto-backup of slots data", file=file)
+            if force: print("💾 Emergency save completed.")
+        except Exception:
+            pass
+
+    @tasks.loop(minutes=30)
+    async def backup_task(self):
+        await self.save_database()
+
+    @tasks.loop(hours=1)
+    async def check_expirations(self):
+        now = time.time()
+        for ch_id, slot in list(self.db["slots"].items()):
+            if slot.get("expire_at") and now > slot["expire_at"] and slot.get("status") == "active":
+                channel = self.get_channel(int(ch_id))
+                if channel:
+                    owner = channel.guild.get_member(slot["owner_id"])
+                    if owner: await channel.set_permissions(owner, send_messages=False, mention_everyone=False)
+                    await channel.send(embed=error_embed(f"<@{slot['owner_id']}>, your slot rental has expired."))
+                self.db["slots"][ch_id]["status"] = "expired"
+
+    @tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=datetime.timezone.utc))
+    async def reset_pings(self):
+        for ch_id, slot in self.db["slots"].items():
+            if slot.get("status") in ["active", "hold"]:
+                slot["used_here"] = 0
+                slot["used_everyone"] = 0
+                if slot.get("status") == "active":
+                    channel = self.get_channel(int(ch_id))
+                    if channel: await channel.send(embed=pro_embed("🔄 Daily Reset", "Your daily mentions have been reset to zero."))
+
+bot = MassiveSlotBot()
 
 # ==========================================
 # CLIENT COMMANDS
@@ -205,8 +240,7 @@ async def myslot(interaction: discord.Interaction):
     user_id = interaction.user.id
     slot_info = next((s for s in bot.db["slots"].values() if s["owner_id"] == user_id and s["status"] != "deleted"), None)
     
-    if not slot_info:
-        return await interaction.response.send_message(embed=error_embed("You do not own an active slot."), ephemeral=True)
+    if not slot_info: return await interaction.response.send_message(embed=error_embed("You do not own an active slot."), ephemeral=True)
 
     embed = pro_embed("Slot Information")
     embed.add_field(name="Slot Owner", value=f"{interaction.user.mention}\n`{user_id}`", inline=False)
@@ -227,27 +261,17 @@ async def myslot(interaction: discord.Interaction):
 @bot.tree.command(name="customize", description="Customize your slot channel name and description.")
 async def customize(interaction: discord.Interaction):
     ch_id_str = str(interaction.channel.id)
-    
-    if ch_id_str not in bot.db["slots"]:
-        return await interaction.response.send_message(embed=error_embed("This command can only be used inside a valid slot channel."), ephemeral=True)
-    
+    if ch_id_str not in bot.db["slots"]: return await interaction.response.send_message(embed=error_embed("This command can only be used inside a valid slot channel."), ephemeral=True)
     slot = bot.db["slots"][ch_id_str]
-    
-    if slot["owner_id"] != interaction.user.id:
-        return await interaction.response.send_message(embed=error_embed("Only the slot owner can customize this channel."), ephemeral=True)
-        
-    if slot["status"] != "active":
-        return await interaction.response.send_message(embed=error_embed("Your slot must be active to customize it."), ephemeral=True)
-
+    if slot["owner_id"] != interaction.user.id: return await interaction.response.send_message(embed=error_embed("Only the slot owner can customize this channel."), ephemeral=True)
+    if slot["status"] != "active": return await interaction.response.send_message(embed=error_embed("Your slot must be active to customize it."), ephemeral=True)
     await interaction.response.send_modal(CustomizeModal())
 
 @bot.tree.command(name="nuke", description="Delete and recreate your slot channel. (Slot owners only)")
 async def nuke(interaction: discord.Interaction):
     ch_id_str = str(interaction.channel.id)
     slot = bot.db["slots"].get(ch_id_str)
-    
-    if not slot or slot["owner_id"] != interaction.user.id:
-        return await interaction.response.send_message(embed=error_embed("You can only nuke a slot you own, inside the slot channel."), ephemeral=True)
+    if not slot or slot["owner_id"] != interaction.user.id: return await interaction.response.send_message(embed=error_embed("You can only nuke a slot you own, inside the slot channel."), ephemeral=True)
 
     await interaction.response.send_message(embed=pro_embed("☢️ Nuking...", "Recreating channel..."), ephemeral=True)
     new_channel = await interaction.channel.clone(reason="User requested slot nuke.")
@@ -259,8 +283,7 @@ async def nuke(interaction: discord.Interaction):
 
 @bot.tree.command(name="redeem", description="Redeem a key to activate your slot.")
 async def redeem(interaction: discord.Interaction, key: str):
-    if key not in bot.db["keys"]:
-        return await interaction.response.send_message(embed=error_embed("Invalid or expired redeem key."), ephemeral=True)
+    if key not in bot.db["keys"]: return await interaction.response.send_message(embed=error_embed("Invalid or expired redeem key."), ephemeral=True)
     
     duration = bot.db["keys"][key]["duration"]
     expire_timestamp = (datetime.datetime.now() + relativedelta(days=duration)).timestamp() if duration > 0 else None
@@ -289,42 +312,60 @@ async def redeem(interaction: discord.Interaction, key: str):
 # ==========================================
 # ADMIN COMMANDS
 # ==========================================
+@bot.tree.command(name="rpanel", description="Post the slot transfer panel. (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def rpanel(interaction: discord.Interaction):
+    embed = pro_embed("🔄 Slot Transfer Management", "Click the button below to transfer the ownership of this slot to another user. You will need their Discord User ID.")
+    await interaction.channel.send(embed=embed, view=TransferPanelView())
+    await interaction.response.send_message("Panel posted.", ephemeral=True)
+
+@bot.tree.command(name="transfer", description="Transfer a slot from one user to another. (Admin only)")
+@app_commands.default_permissions(administrator=True)
+async def transfer(interaction: discord.Interaction, current_owner: discord.Member, new_owner: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    transferred = 0
+    for ch_id, slot in bot.db["slots"].items():
+        if slot["owner_id"] == current_owner.id:
+            channel = bot.get_channel(int(ch_id))
+            if channel:
+                await channel.set_permissions(current_owner, overwrite=None)
+                overwrites = discord.PermissionOverwrite(read_messages=True, send_messages=True, mention_everyone=True, manage_messages=True)
+                await channel.set_permissions(new_owner, overwrite=overwrites)
+                await channel.send(embed=pro_embed("🔄 Slot Transferred", f"Admin transferred this slot to {new_owner.mention}."))
+            slot["owner_id"] = new_owner.id
+            transferred += 1
+            
+    if transferred > 0:
+        await bot.save_database(force=True)
+        await interaction.followup.send(embed=pro_embed("✅ Transfer Complete", f"Successfully transferred {transferred} slot(s) to {new_owner.mention}."))
+    else:
+        await interaction.followup.send(embed=error_embed(f"{current_owner.mention} does not own any active slots."))
+
 @bot.tree.command(name="create", description="Create a private slot channel for a user. (Admin only)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="The owner of the slot", duration="Duration: 1w, 1m, or lifetime")
 async def create_slot(interaction: discord.Interaction, user: discord.Member, duration: str):
     await interaction.response.defer(ephemeral=True)
-    
     duration = duration.lower()
     expire_timestamp = None
-    
-    if duration == "1w":
-        expire_timestamp = (datetime.datetime.now() + relativedelta(weeks=1)).timestamp()
-    elif duration == "1m":
-        expire_timestamp = (datetime.datetime.now() + relativedelta(months=1)).timestamp()
-    elif duration != "lifetime":
-        return await interaction.followup.send(embed=error_embed("Invalid duration. Use `1w`, `1m`, or `lifetime`."))
+    if duration == "1w": expire_timestamp = (datetime.datetime.now() + relativedelta(weeks=1)).timestamp()
+    elif duration == "1m": expire_timestamp = (datetime.datetime.now() + relativedelta(months=1)).timestamp()
+    elif duration != "lifetime": return await interaction.followup.send(embed=error_embed("Invalid duration. Use `1w`, `1m`, or `lifetime`."))
 
     category = interaction.channel.category
     overwrites = {
         interaction.guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
         user: discord.PermissionOverwrite(read_messages=True, send_messages=True, mention_everyone=True, manage_messages=True)
     }
-    
     new_channel = await interaction.guild.create_text_channel(name=f"slot-{user.name}", category=category, overwrites=overwrites)
 
     bot.db["slots"][str(new_channel.id)] = {
-        "owner_id": user.id,
-        "expire_at": expire_timestamp,
-        "start_time": time.time(),
-        "limit_here": 0, "limit_everyone": 0, "used_here": 0, "used_everyone": 0,
-        "status": "active"
+        "owner_id": user.id, "expire_at": expire_timestamp, "start_time": time.time(),
+        "limit_here": 0, "limit_everyone": 0, "used_here": 0, "used_everyone": 0, "status": "active"
     }
     await bot.save_database(force=True)
-
     await interaction.followup.send(embed=pro_embed("✅ Slot Created", f"Slot successfully created: {new_channel.mention}"))
     await new_channel.send(content=user.mention, embed=pro_embed("🎉 Welcome", "Your slot has been configured. An admin will set your ping limits shortly."))
-
 
 @bot.tree.command(name="create_key", description="Generate a redeem key for a slot plan. (Admin only)")
 @app_commands.default_permissions(administrator=True)
@@ -332,16 +373,12 @@ async def create_key(interaction: discord.Interaction, days: int):
     new_key = f"AD-{str(uuid.uuid4()).split('-')[0].upper()}"
     bot.db["keys"][new_key] = {"duration": days}
     await bot.save_database(force=True)
-    
-    embed = pro_embed("🔑 Key Generated", f"**Key:** `{new_key}`\n**Duration:** {days} days")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=pro_embed("🔑 Key Generated", f"**Key:** `{new_key}`\n**Duration:** {days} days"), ephemeral=True)
 
 @bot.tree.command(name="keys", description="List all active redeem keys. (Admin only)")
 @app_commands.default_permissions(administrator=True)
 async def list_keys(interaction: discord.Interaction):
-    if not bot.db["keys"]:
-        return await interaction.response.send_message(embed=error_embed("No active keys found."), ephemeral=True)
-    
+    if not bot.db["keys"]: return await interaction.response.send_message(embed=error_embed("No active keys found."), ephemeral=True)
     desc = "\n".join([f"`{k}` - {v['duration']} Days" for k, v in bot.db["keys"].items()])
     await interaction.response.send_message(embed=pro_embed("Active Redeem Keys", desc), ephemeral=True)
 
@@ -376,8 +413,7 @@ async def unrevoke_slot(interaction: discord.Interaction, user: discord.Member):
                 await channel.set_permissions(user, send_messages=True, mention_everyone=True, manage_messages=True)
                 await channel.send(embed=pro_embed("✅ Access Restored", "An administrator has restored your slot access."))
             slot["status"] = "active"
-            slot["used_here"] = 0
-            slot["used_everyone"] = 0
+            slot["used_here"] = 0; slot["used_everyone"] = 0
             await bot.save_database(force=True)
             return await interaction.response.send_message(embed=pro_embed("✅ Slot Restored", f"Successfully restored {user.mention}."), ephemeral=True)
     await interaction.response.send_message(embed=error_embed("No revoked slot found for this user."), ephemeral=True)
@@ -400,13 +436,10 @@ async def hold_slot(interaction: discord.Interaction, user: discord.Member):
 @app_commands.default_permissions(administrator=True)
 async def setpings(interaction: discord.Interaction, here_limit: int, everyone_limit: int):
     ch_id_str = str(interaction.channel.id)
-    if ch_id_str not in bot.db["slots"]:
-        return await interaction.response.send_message(embed=error_embed("This channel is not a registered slot."), ephemeral=True)
-        
+    if ch_id_str not in bot.db["slots"]: return await interaction.response.send_message(embed=error_embed("This channel is not a registered slot."), ephemeral=True)
     bot.db["slots"][ch_id_str]["limit_here"] = here_limit
     bot.db["slots"][ch_id_str]["limit_everyone"] = everyone_limit
     await bot.save_database(force=True)
-    
     await interaction.response.send_message(embed=pro_embed("⚙️ Pings Updated", f"Limits updated successfully:\n`@here`: {here_limit}\n`@everyone`: {everyone_limit}"), ephemeral=True)
 
 @bot.tree.command(name="say", description="Send a formatted product listing message as the bot.")
@@ -433,12 +466,10 @@ async def on_message(message: discord.Message):
                 revoked, reason = False, ""
                 if has_everyone:
                     slot["used_everyone"] += 1
-                    if slot["used_everyone"] > slot["limit_everyone"]: 
-                        revoked, reason = True, "@everyone"
+                    if slot["used_everyone"] > slot["limit_everyone"]: revoked, reason = True, "@everyone"
                 if has_here and not revoked:
                     slot["used_here"] += 1
-                    if slot["used_here"] > slot["limit_here"]: 
-                        revoked, reason = True, "@here"
+                    if slot["used_here"] > slot["limit_here"]: revoked, reason = True, "@here"
 
                 if revoked:
                     slot["status"] = "revoked"
