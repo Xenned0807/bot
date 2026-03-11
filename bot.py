@@ -100,8 +100,8 @@ class CatalogueDropdown(Select):
 
         elif val == 'sw':
             embed.title = "<:web:1481088736237457559> | Software & AI"
-            embed.add_field(name="<:question2:1481087011698774270> AI Tools", value="<:dot:1481087122684383382> **ChatGPT Plus**: 5.00€\n<:dot:1481087122684383382> **Canva Pro**: 1.20€", inline=False)
-            embed.add_field(name="<:stock:1481088748891672626> Developer Tools", value="<:dot:1481087122684383382> **Boost Tool Source**: 15.00€", inline=False)
+            embed.add_field(name="<:question2:1481087011698774270> AI Tools", value="<:dot:1481087122684383382> **ChatGPT Plus**: 5.00€\n<:dot:1481087122684383382> **Gemini Pro + 2TB storage**: 7.50€\n<:dot:1481087122684383382> **Perplexity FA LIFETIME**: 5.50€", inline=False)
+            embed.add_field(name="<:stock:1481088748891672626> Developer Tools", value="<:dot:1481087122684383382> **Boost Tool (src)**: 9.99€\n<:dot:1481087122684383382> **Boost Bot (src)**: 12.99€\n<:dot:1481087122684383382> **Slot Bot (src)**: 3.99€", inline=False)
 
         elif val == 'sb':
             embed.title = "<:rocket2:1481087095878451250> | Social Boost"
@@ -127,7 +127,7 @@ class CatalogueView(View):
 @app_commands.default_permissions(administrator=True)
 async def stock(interaction: discord.Interaction):
     # Pas de header/bannière ici, uniquement le corps du texte
-    desc = f"""## <:cart:1481081418476945582> **| Void Market — Official Stock**
+    desc = f"""## <:cart:1481086993910992906> **| Void Market — Official Stock**
 -# <:info:1481086978387869867> Select a category below to view our products.
 
 {LINE}
@@ -178,3 +178,4 @@ async def web(interaction: discord.Interaction):
 if __name__ == "__main__":
     keep_alive()
     bot.run(os.environ.get("DISCORD_TOKEN"))
+
