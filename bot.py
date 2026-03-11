@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from discord.ui import Select, View
+from discord.ui import Select, View, Button
 import os
 from flask import Flask
 from threading import Thread
@@ -31,13 +31,10 @@ class VoidMarketBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
-        # Prefix is still required by the library, but we will use Slash Commands
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Keeps the view active even after the bot restarts
         self.add_view(CatalogueView())
-        # Syncs the slash commands globally with Discord
         await self.tree.sync()
         print("Slash commands synced successfully!")
 
@@ -46,78 +43,49 @@ bot = VoidMarketBot()
 @bot.event
 async def on_ready():
     print(f'Successfully logged in as {bot.user}')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Void Market Stock"))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Void Market"))
 
 # ==========================================
 # 3. CATALOGUE DROPDOWN MENU (INTERACTIVE)
 # ==========================================
 class CatalogueDropdown(Select):
     def __init__(self):
-        # Dropdown options (Categories)
         options = [
-            discord.SelectOption(
-                label='Discord Services',
-                description='Nitro, Server Boosts, Tokens, Accounts...',
-                emoji='👾', # Replace with a custom emoji ID like <:name:ID>
-                value='discord_services'
-            ),
-            discord.SelectOption(
-                label='Streaming & VOD',
-                description='Netflix, Disney+, Spotify, DAZN...',
-                emoji='🍿', 
-                value='streaming_services'
-            ),
-            discord.SelectOption(
-                label='Software & AI',
-                description='ChatGPT Plus, Canva Pro, VPN...',
-                emoji='💻', 
-                value='software_ai'
-            ),
-            discord.SelectOption(
-                label='Social Boost',
-                description='Panel & Social Media Boosts...',
-                emoji='🚀', 
-                value='social_boost'
-            )
+            discord.SelectOption(label='Discord Services', description='Nitro, Server Boosts, Tokens, Accounts...', emoji='<:serverboost:1481083615273025627>', value='discord_services'),
+            discord.SelectOption(label='Streaming & VOD', description='Netflix, Disney+, Spotify, DAZN...', emoji='🍿', value='streaming_services'),
+            discord.SelectOption(label='Software & AI', description='ChatGPT Plus, Canva Pro, VPN...', emoji='💻', value='software_ai'),
+            discord.SelectOption(label='Social Boost', description='Panel & Social Media Boosts...', emoji='<:rocket2:1481082136319754382>', value='social_boost')
         ]
         super().__init__(placeholder='Browse Void Market Products', min_values=1, max_values=1, options=options, custom_id='void_market_stock_menu')
 
-    # What happens when a user selects a category
     async def callback(self, interaction: discord.Interaction):
         choice = self.values[0]
         
-        info_embed = discord.Embed(color=0x2B2D31) # Dark Discord background color
+        info_embed = discord.Embed(color=0x7110ff) # VOID MARKET PURPLE
         
         if choice == 'discord_services':
-            info_embed.title = "👾 | Stock: Discord Services"
+            info_embed.title = "<:serverboost:1481083615273025627> | Stock: Discord Services"
             info_embed.description = "Here are our current prices for Discord-related services:"
-            info_embed.add_field(name="💎 Nitro & Promos", value="• **Nitro (Classic/Boost)**: $[Price]\n• **Nitro Promos**: $[Price]", inline=False)
-            info_embed.add_field(name="🚀 Boosts & Tools", value="• **Server Boosts**: $[Price]\n• **Boost Tool**: $[Price]", inline=False)
-            info_embed.add_field(name="👥 Members & Tokens", value="• **Real Members**: $[Price]\n• **Tokens (Classic & Nitro)**: $[Price]", inline=False)
-            info_embed.add_field(name="⚙️ Accounts & Misc", value="• **Aged Accounts**: $[Price]\n• **Decorations**: $[Price]", inline=False)
+            info_embed.add_field(name="💎 Nitro & Promos", value="<:dot:1481083633446948954> **Nitro (Classic/Boost)**: <:money:1481081399548186674> [Price]\n<:dot:1481083633446948954> **Nitro Promos**: <:money:1481081399548186674> [Price]", inline=False)
+            info_embed.add_field(name="<:rocket2:1481082136319754382> Boosts & Tools", value="<:dot:1481083633446948954> **Server Boosts**: <:money:1481081399548186674> [Price]\n<:dot:1481083633446948954> **Boost Tool**: <:money:1481081399548186674> [Price]", inline=False)
 
         elif choice == 'streaming_services':
             info_embed.title = "🍿 | Stock: Streaming & VOD"
             info_embed.description = "Enjoy your favorite movies, series, and music at the best prices:"
-            info_embed.add_field(name="📺 Movies & Series", value="• **Netflix**: $[Price]\n• **Disney+**: $[Price]\n• **Prime Video**: $[Price]\n• **Paramount+**: $[Price]", inline=False)
-            info_embed.add_field(name="🎵 Music & Anime", value="• **Spotify Premium**: $[Price]\n• **Crunchyroll**: $[Price]", inline=False)
-            info_embed.add_field(name="⚽ Sports", value="• **DAZN**: $[Price]", inline=False)
+            info_embed.add_field(name="📺 Movies & Series", value="<:dot:1481083633446948954> **Netflix**: <:money:1481081399548186674> [Price]\n<:dot:1481083633446948954> **Disney+**: <:money:1481081399548186674> [Price]", inline=False)
 
         elif choice == 'software_ai':
             info_embed.title = "💻 | Stock: Software & AI"
             info_embed.description = "Boost your productivity and secure your connection:"
-            info_embed.add_field(name="🤖 Artificial Intelligence", value="• **ChatGPT Plus**: $[Price]", inline=False)
-            info_embed.add_field(name="🎨 Design & Editing", value="• **Canva Pro**: $[Price]\n• **CapCut Pro**: $[Price]", inline=False)
-            info_embed.add_field(name="🔒 Security", value="• **Nord VPN**: $[Price]", inline=False)
+            info_embed.add_field(name="🤖 Artificial Intelligence", value="<:dot:1481083633446948954> **ChatGPT Plus**: <:money:1481081399548186674> [Price]", inline=False)
 
         elif choice == 'social_boost':
-            info_embed.title = "🚀 | Stock: Social Boost"
+            info_embed.title = "<:rocket2:1481082136319754382> | Stock: Social Boost"
             info_embed.description = "Grow your social media presence effortlessly:"
-            info_embed.add_field(name="📈 Boosts", value="• **Social Boost (Followers, Views...)**: $[Price]\n• **Panel Access**: $[Price]", inline=False)
+            info_embed.add_field(name="📈 Boosts", value="<:dot:1481083633446948954> **Social Boost**: <:money:1481081399548186674> [Price]\n<:dot:1481083633446948954> **Panel Access**: <:money:1481081399548186674> [Price]", inline=False)
 
+        # Utilisation de l'emoji ticket dans le footer
         info_embed.set_footer(text="To place an order, please open a ticket in the dedicated channel.")
-
-        # SENDING THE MESSAGE IN EPHEMERAL MODE (Only the user sees it)
         await interaction.response.send_message(embed=info_embed, ephemeral=True)
 
 class CatalogueView(View):
@@ -126,36 +94,78 @@ class CatalogueView(View):
         self.add_item(CatalogueDropdown())
 
 # ==========================================
-# 4. SLASH COMMAND (/stock)
+# 4. SLASH COMMANDS (/stock & /web)
 # ==========================================
-@bot.tree.command(name="stock", description="Deploys the Void Market official stock embed in the current channel.")
-@app_commands.default_permissions(administrator=True) # Only admins can see and use this command
+
+# --- COMMANDE /STOCK ---
+@bot.tree.command(name="stock", description="Deploys the Void Market official stock embed.")
+@app_commands.default_permissions(administrator=True)
 async def stock(interaction: discord.Interaction):
-    # The Main Professional Embed
+    
+    # Structure Markdown Ultime avec tes Emojis Custom !
+    description_text = """## <:cart:1481081418476945582> **| Void Market — Official Stock**
+-# <:info:1481081383181881445> Our team is here to help. Select a category below to view our products.
+
+<:serverboost:1481083615273025627> **Discord Services**
+<:dot:1481083633446948954> Nitro, Server Boosts, Tokens, Accounts...
+<:dot:1481083633446948954> Delivery is instant and secure.
+
+🍿 **Streaming & VOD**
+<:dot:1481083633446948954> Netflix, Disney+, Spotify, Crunchyroll...
+<:dot:1481083633446948954> Premium accounts at the best market price.
+
+💻 **Software & AI**
+<:dot:1481083633446948954> ChatGPT Plus, Canva Pro, Nord VPN...
+<:dot:1481083633446948954> Boost your productivity effortlessly.
+
+<:rocket2:1481082136319754382> **Social Boost**
+<:dot:1481083633446948954> Panel, Boosts for your social media...
+<:dot:1481083633446948954> Fast delivery to grow your audience.
+
+<:question2:1481082264602546227> **Important Note:**
+-# <:ticket2:1481082245698814034> By purchasing, you agree to our terms. Simply open a ticket in the order channel after making your choice!"""
+
     embed = discord.Embed(
-        title="🛒 | Void Market — Official Stock",
-        description="Welcome to the **Void Market** store.\nSelect a category from the menu below to view our available products and real-time pricing.\n\n---",
-        color=0xE50914 # Pro Red Color
+        description=description_text,
+        color=0x7110ff # VOID MARKET PURPLE
     )
     
-    # ⚠️ UNCOMMENT THE LINE BELOW AND PASTE YOUR IMAGE LINK FOR THE BANNER
-    embed.set_image(url="https://files.catbox.moe/l23tfy.jpg")
-    
-    # \n\n--- creates the sleek separator lines you wanted
-    embed.add_field(name="👾 Discord Services", value="Nitro, Server Boosts, Tokens, Accounts...\n\n---", inline=False)
-    embed.add_field(name="🍿 Streaming & VOD", value="Netflix, Disney+, Spotify, Crunchyroll...\n\n---", inline=False)
-    embed.add_field(name="💻 Software & AI", value="ChatGPT Plus, Canva Pro, Nord VPN...\n\n---", inline=False)
-    embed.add_field(name="🚀 Social Boost", value="Panel, Boosts for your social media...\n\n---", inline=False)
-    
-    embed.add_field(name="❗ How to purchase?", value="> Simply open a ticket in the order channel after making your choice!", inline=False)
+    # Bannière Catbox activée !
+    embed.set_image(url="https://files.catbox.moe/l23tfy.jpg") 
     
     embed.set_footer(text="Void Market © 2026", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
 
-    # Sends the embed and the dropdown menu to the channel
     await interaction.channel.send(embed=embed, view=CatalogueView())
-    
-    # Replies to the admin who used the command (only the admin sees this confirmation)
     await interaction.response.send_message("✅ Stock embed deployed successfully!", ephemeral=True)
+
+
+# --- COMMANDE /WEB ---
+@bot.tree.command(name="web", description="Deploys the Void Market website embed with direct link.")
+@app_commands.default_permissions(administrator=True)
+async def web(interaction: discord.Interaction):
+    
+    # Embed du site web avec la flèche (arrow)
+    embed = discord.Embed(
+        title="<:cart:1481081418476945582> Website",
+        description="<:arrow:1481083646948671509> Instant Delivery\n<:arrow:1481083646948671509> Support 24/24\n<:arrow:1481083646948671509> Simple and Secure Payment\n\n**https://voidmrkt.mysellauth.com/**",
+        color=0x7110ff # VOID MARKET PURPLE
+    )
+    
+    # ⚠️ Tu peux rajouter le lien d'une autre image ici pour l'embed /web !
+    embed.set_image(url="https://files.catbox.moe/l23tfy.jpg") 
+    
+    # Bouton avec ton emoji caddie !
+    view = View()
+    button = Button(
+        label="Go to Website", 
+        style=discord.ButtonStyle.link,
+        url="https://voidmrkt.mysellauth.com/", 
+        emoji=discord.PartialEmoji.from_str("<:cart:1481081418476945582>")
+    )
+    view.add_item(button)
+
+    await interaction.channel.send(embed=embed, view=view)
+    await interaction.response.send_message("✅ Website embed deployed successfully!", ephemeral=True)
 
 # ==========================================
 # 5. BOT STARTUP
